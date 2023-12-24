@@ -1,3 +1,5 @@
+import AVFoundation
+import AVKit
 import CoreMedia
 import Foundation
 import LibMPV
@@ -8,7 +10,11 @@ import QuartzCore
     import UIKit
 #endif
 
-public class MPVClient: ObservableObject {
+public class MPVMediaPlayer: ObservableObject {
+    private var configuration: MPVVideoPlayer.Configuration
+    private let onTicksUpdated: (Int, MPVVideoPlayer.PlaybackInformation) -> Void
+    private let onStateUpdated: (MPVVideoPlayer.State, MPVVideoPlayer.PlaybackInformation) -> Void
+    private let loggingInfo: (logger: MPVVideoPlayerLogger, level: MPVVideoPlayer.LoggingLevel)?
     static var logFile: URL {
         URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true).appendingPathComponent("mpvkit-mpv-log.txt")
     }
@@ -26,6 +32,57 @@ public class MPVClient: ObservableObject {
     var isPlaying = true
     var enableLogging = true
     private var onFileLoaded: (() -> Void)?
+    var rate: Float = 1.0
+    var seekable = true
+    var position: Float = 0.0
+    var length: Int {
+        Int(duration.seconds)
+    }
+
+    var currentVideoSubTitleIndex: Int {
+        mpv == nil ? 0 : getInt("current-tracks/sub/id")
+    }
+
+    var currentAudioTrackIndex: Int {
+        mpv == nil ? 0 : getInt("current-tracks/audio/id")
+    }
+
+    var fileSize: Double {
+        mpv == nil ? 0.0 : getDouble("file-size")
+    }
+
+    var videoSize: CGSize {
+        mpv == nil ? .init(width: 1920, height: 1080) : .init(width: 1920, height: 1080)
+    }
+
+    var subtitleTracks: [MediaTrack] {
+        [
+            MediaTrack(index: 0, title: "22222"),
+            MediaTrack(index: 1, title: "22222")
+        ]
+    }
+
+    var audioTracks: [MediaTrack] {
+        [
+            MediaTrack(index: 0, title: "22222"),
+            MediaTrack(index: 1, title: "22222")
+        ]
+    }
+
+    var currentSubtitleTrack: MediaTrack = .init(index: 0, title: "22222")
+    var currentAudioTrack: MediaTrack = .init(index: 0, title: "22222")
+
+    init(
+        configuration: MPVVideoPlayer.Configuration,
+        onTicksUpdated: @escaping (Int, MPVVideoPlayer.PlaybackInformation) -> Void,
+        onStateUpdated: @escaping (MPVVideoPlayer.State, MPVVideoPlayer.PlaybackInformation) -> Void,
+        loggingInfo: (MPVVideoPlayerLogger, MPVVideoPlayer.LoggingLevel)?
+    ) {
+        self.configuration = configuration
+        self.onTicksUpdated = onTicksUpdated
+        self.onStateUpdated = onStateUpdated
+        self.loggingInfo = loggingInfo
+    }
 
     func create(frame: CGRect? = nil) {
         mpv = mpv_create()
@@ -35,7 +92,7 @@ public class MPVClient: ObservableObject {
         }
 
         if enableLogging {
-            checkError(mpv_set_option_string(
+            checkError(mpv_set_property_string(
                 mpv,
                 "log-file",
                 Self.logFile.absoluteString.replacingOccurrences(of: "file://", with: "")
@@ -50,15 +107,23 @@ public class MPVClient: ObservableObject {
         }
 
         #if os(macOS)
-            checkError(mpv_set_option_string(mpv, "input-media-keys", "yes"))
+            checkError(mpv_set_property_string(mpv, "input-media-keys", "yes"))
         #endif
-        checkError(mpv_set_option_string(mpv, "sub-fonts-dir", Bundle.main.bundleURL.path + "/fonts"))
-        checkError(mpv_set_option_string(mpv, "sub-font", "SF Pro"))
-        checkError(mpv_set_option_string(mpv, "cache-pause-initial", "yes"))
-        checkError(mpv_set_option_string(mpv, "cache-secs", "120"))
-        checkError(mpv_set_option_string(mpv, "cache-pause-wait", "3"))
-        checkError(mpv_set_option_string(mpv, "keep-open", "yes"))
-        // checkError(mpv_set_option_string(mpv, "hwdec", machine == "x86_64" ? "no" : "auto-safe"))
+        mpv_set_property_string(mpv, "sub-back-color", "0.0/0.0/0.0/0.75")
+        mpv_set_property_string(mpv, "sub-border-size", "0")
+        mpv_set_property_string(mpv, "sub-shadow-offset", "4")
+        mpv_set_property_string(mpv, "sub-shadow-color", "0.0/0.0/0.0/0.0")
+        #if os(tvOS)
+            mpv_set_property_string(mpv, "sub-font-size", "47")
+        #else
+            mpv_set_property_string(mpv, "sub-font-size", "40")
+        #endif
+        checkError(mpv_set_property_string(mpv, "cache-pause-initial", "yes"))
+        // checkError(mpv_set_property_string(mpv, "cache-secs", "120"))
+
+        checkError(mpv_set_property_string(mpv, "cache-pause-wait", "3"))
+        checkError(mpv_set_property_string(mpv, "keep-open", "yes"))
+        // checkError(mpv_set_property_string(mpv, "hwdec", machine == "x86_64" ? "no" : "auto-safe"))
 
         metalLayer.frame = frame!
         #if !os(macOS)
@@ -78,18 +143,17 @@ public class MPVClient: ObservableObject {
         mpv_set_property_string(mpv, "gpu-api", "vulkan")
         mpv_set_property_string(mpv, "gpu-context", "moltenvk")
         mpv_set_property_string(mpv, "hwdec", "videotoolbox")
+        // TODO: set dynamicly
+        mpv_set_property_string(mpv, "profile", "fast")
 
-        checkError(mpv_set_option_string(mpv, "slang", "eng,chi"))
-        // checkError(mpv_set_option_string(mpv, "dither-depth", "auto"));
-        // checkError(mpv_set_option_string(mpv, "hwdec-codecs", "all"));
-        // checkError(mpv_set_option_string(mpv, "gpu-hwdec-interop", "auto"));
-        checkError(mpv_set_option_string(mpv, "demuxer-lavf-analyzeduration", "1"))
+        checkError(mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "1"))
 
         checkError(mpv_initialize(mpv))
 
         queue = DispatchQueue(label: "mpv")
 
-        mpv_set_wakeup_callback(mpv, wakeUp, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
+        // TODO: add cancel when deinit
+        readEvents()
         mpv_observe_property(mpv, 0, "pause", MPV_FORMAT_FLAG)
         mpv_observe_property(mpv, 0, "core-idle", MPV_FORMAT_FLAG)
         // command("script-binding", args: ["stats/display-stats-toggle"])
@@ -98,9 +162,9 @@ public class MPVClient: ObservableObject {
     func readEvents() {
         queue?.async { [self] in
             while self.mpv != nil {
-                let event = mpv_wait_event(self.mpv, 0)
+                let event = mpv_wait_event(self.mpv, -1)
                 if event!.pointee.event_id == MPV_EVENT_NONE {
-                    break
+                    continue
                 }
                 handle(event)
             }
@@ -145,22 +209,22 @@ public class MPVClient: ObservableObject {
         command("loadfile", args: args, returnValueCallback: completionHandler)
     }
 
-    func play() {
+    public func play() {
         isPlaying = true
         setFlagAsync("pause", false)
     }
 
-    func pause() {
+    public func pause() {
         isPlaying = false
         setFlagAsync("pause", true)
     }
 
-    func togglePlay() {
+    public func togglePlay() {
         isPlaying = isPlaying ? false : true
         command("cycle", args: ["pause"])
     }
 
-    func stop() {
+    public func stop() {
         command("stop")
     }
 
@@ -246,7 +310,7 @@ public class MPVClient: ObservableObject {
         return dh.isZero ? defaultDh : dh
     }
 
-    var duration: CMTime {
+    public var duration: CMTime {
         CMTime.secondsInDefaultTimescale(mpv == nil ? -1 : getDouble("duration"))
     }
 
@@ -299,6 +363,7 @@ public class MPVClient: ObservableObject {
                     + "\(String(cString: (logmsg!.pointee.text)!))"))
 
         case MPV_EVENT_FILE_LOADED:
+            onStateUpdated(.loaded, constructPlaybackInformation())
             onFileLoaded?()
             startClientUpdates()
             onFileLoaded = nil
@@ -335,6 +400,7 @@ public class MPVClient: ObservableObject {
                     self.eofPlaybackModeAction()
                 }
             } else {
+                onStateUpdated(.ended, constructPlaybackInformation())
                 DispatchQueue.main.async { [weak self] in self?.handleEndOfFile() }
             }
 
@@ -376,6 +442,10 @@ public class MPVClient: ObservableObject {
         command("sub-add", args: [url.absoluteString])
     }
 
+    func subReload() {
+        command("sub-reload")
+    }
+
     func removeSubs() {
         command("sub-remove")
     }
@@ -392,39 +462,51 @@ public class MPVClient: ObservableObject {
         Int(getString("track-list/count") ?? "-1") ?? -1
     }
 
-    private func getFlag(_ name: String) -> Bool {
+    public func getFlag(_ name: String) -> Bool {
         var data = Int64()
         mpv_get_property(mpv, name, MPV_FORMAT_FLAG, &data)
         return data > 0
     }
 
-    private func setFlagAsync(_ name: String, _ flag: Bool) {
+    public func setFlagAsync(_ name: String, _ flag: Bool) {
         guard mpv != nil else { return }
         var data: Int = flag ? 1 : 0
         mpv_set_property_async(mpv, 0, name, MPV_FORMAT_FLAG, &data)
     }
 
-    func setDoubleAsync(_ name: String, _ value: Double) {
+    public func setFlag(_ name: String, _ flag: Bool) {
+        guard mpv != nil else { return }
+        var data: Int = flag ? 1 : 0
+        mpv_set_property(mpv, name, MPV_FORMAT_FLAG, &data)
+    }
+
+    public func setDoubleAsync(_ name: String, _ value: Double) {
         guard mpv != nil else { return }
         var data = value
         mpv_set_property_async(mpv, 0, name, MPV_FORMAT_DOUBLE, &data)
     }
 
-    private func getDouble(_ name: String) -> Double {
+    public func setDouble(_ name: String, _ value: Double) {
+        guard mpv != nil else { return }
+        var data = value
+        mpv_set_property(mpv, name, MPV_FORMAT_DOUBLE, &data)
+    }
+
+    public func getDouble(_ name: String) -> Double {
         guard mpv != nil else { return 0.0 }
         var data = Double()
         mpv_get_property(mpv, name, MPV_FORMAT_DOUBLE, &data)
         return data
     }
 
-    private func getInt(_ name: String) -> Int {
+    public func getInt(_ name: String) -> Int {
         guard mpv != nil else { return 0 }
         var data = Int64()
         mpv_get_property(mpv, name, MPV_FORMAT_INT64, &data)
         return Int(data)
     }
 
-    func getString(_ name: String) -> String? {
+    public func getString(_ name: String) -> String? {
         guard mpv != nil else { return nil }
         let cstr = mpv_get_property_string(mpv, name)
         let str: String? = cstr == nil ? nil : String(cString: cstr!)
@@ -432,9 +514,19 @@ public class MPVClient: ObservableObject {
         return str
     }
 
-    private func setString(_ name: String, _ value: String) {
+    public func setString(_ name: String, _ value: String) {
         guard mpv != nil else { return }
         mpv_set_property_string(mpv, name, value)
+    }
+
+    public func toggleStats() {
+        command("script-binding", args: ["stats/display-stats-toggle"])
+    }
+
+    public func setInt(_ name: String, _ value: Int64) {
+        guard mpv != nil else { return }
+        var data = value
+        mpv_set_property(mpv, name, MPV_FORMAT_INT64, &data)
     }
 
     private func makeCArgs(_ command: String, _ args: [String?]) -> [String?] {
@@ -520,9 +612,108 @@ public class MPVClient: ObservableObject {
         pause()
         stop()
     }
-}
 
-private func wakeUp(_ context: UnsafeMutableRawPointer?) {
-    let client = unsafeBitCast(context, to: MPVClient.self)
-    client.readEvents()
+    func jumpForward(_ seconds: Int) {}
+
+    func jumpBackward(_ seconds: Int) {}
+
+    func fastForward(atRate: Float) {}
+
+    func gotoNextFrame() {}
+
+    func setSubtitleSize(_ size: MPVVideoPlayer.ValueSelector<Int>) {
+        switch size {
+        case .auto:
+            return
+        case let .absolute(size):
+            setInt("sub-font-size", Int64(size))
+        }
+    }
+
+    func setSubtitleFont(_ font: MPVVideoPlayer.ValueSelector<_PlatformFont>) {
+        switch font {
+        case .auto:
+            setSubtitleFont(_PlatformFont.defaultSubtitleFont.fontName)
+        case let .absolute(font):
+            setSubtitleFont(font.fontName)
+        }
+    }
+
+    func setSubtitleFont(_ fontName: String) {
+        setString("sub-font", fontName)
+    }
+
+    func setSubtitleColor(_ color: MPVVideoPlayer.ValueSelector<_PlatformColor>) {
+        let value: UInt
+
+        switch color {
+        case .auto:
+            value = _PlatformColor.white.hex
+        case let .absolute(fontColor):
+            value = fontColor.hex
+        }
+        // setString("sub-color", value)
+    }
+
+    func subtitleTrackIndex(from track: MPVVideoPlayer.ValueSelector<Int>) -> Int {
+        return -1
+        /* guard let indexes = videoSubTitlesIndexes as? [Int] else { return -1 }
+
+         switch track {
+         case .auto:
+             return indexes.first(where: { $0 != -1 }) ?? -1
+         case let .absolute(index):
+             return indexes.contains(index) ? index : -1
+         } */
+    }
+
+    func audioTrackIndex(from track: MPVVideoPlayer.ValueSelector<Int>) -> Int {
+        return -1
+        /* guard let indexes = audioTrackIndexes as? [Int] else { return -1 }
+
+         switch track {
+         case .auto:
+             return indexes.first(where: { $0 != -1 }) ?? -1
+         case let .absolute(index):
+             return indexes.contains(index) ? index : -1
+         } */
+    }
+
+    func rate(from rate: MPVVideoPlayer.ValueSelector<Float>) -> Float {
+        switch rate {
+        case .auto:
+            return 1
+        case let .absolute(speed):
+            return speed
+        }
+    }
+
+    func constructPlaybackInformation() -> MPVVideoPlayer.PlaybackInformation {
+        return MPVVideoPlayer.PlaybackInformation(
+            startConfiguration: configuration,
+            position: position,
+            length: length,
+            isSeekable: seekable,
+            playbackRate: rate,
+            currentSubtitleTrack: currentSubtitleTrack,
+            currentAudioTrack: currentAudioTrack,
+            subtitleTracks: subtitleTracks,
+            audioTracks: audioTracks,
+            numberOfReadBytesOnInput: 0,
+            inputBitrate: 0,
+            numberOfReadBytesOnDemux: 0,
+            demuxBitrate: 0,
+            numberOfDecodedVideoBlocks: 0,
+            numberOfDecodedAudioBlocks: 0,
+            numberOfDisplayedPictures: 0,
+            numberOfLostPictures: 0,
+            numberOfPlayedAudioBuffers: 0,
+            numberOfLostAudioBuffers: 0,
+            numberOfSentPackets: 0,
+            numberOfSentBytes: 0,
+            streamOutputBitrate: 0,
+            numberOfCorruptedDataPackets: 0,
+            numberOfDiscontinuties: 0
+        )
+    }
 }

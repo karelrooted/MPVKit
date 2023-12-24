@@ -62,29 +62,16 @@ In Xcode:
 
 > MPVKit is a WIP(vo=gpu-next is not production ready), currently you have to use libmpv c binding to build your own
 
+MPVKit is structured mostly like [VLCUI](https://github.com/LePips/VLCUI), so can be easily imported in project already support VLCUI as a alternative player
+
 ```swift
 import SwiftUI
 import MPVKit
 
 struct ContentView: View {
-    @State var player = MPVPlayer(url: URL(string: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!)
-    @State var isPlaying: Bool = true
-    
     var body: some View {
         VStack {
-            MPVVideoPlayer(player: player)
-            
-            HStack{
-                Button {
-                    isPlaying ? player.pause() : player.play()
-                    isPlaying.toggle()
-                } label: {
-                    Image(systemName: isPlaying ? "pause.circle" : "play.circle")
-                        .foregroundColor(.white)
-                        .font(.system(size: 60))
-                        .padding()
-                }
-            }
+            MPVVideoPlayer(url: URL(string: "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")!)
         }
     }
 }
